@@ -1,0 +1,87 @@
+# ============ Secretos: NUNCA versionar ============
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials.json
+secrets/
+
+# ============ Python ============
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib60/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ============ Entornos virtuales ============
+venv/
+.venv/
+env/
+ENV/
+.python-version
+
+# ============ Testing y cobertura ============
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# ============ Linters y type checkers ============
+.mypy_cache/
+.dmypy.json
+.ruff_cache/
+.pytype/
+
+# ============ IDEs ============
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ============ Docker ============
+docker-compose.override.yml
+
+# ============ Datos del auditor ============
+# Reportes generados, PDFs y capturas de escaneo no van al repo:
+# pueden contener hallazgos de infraestructura de terceros.
+reports/
+output/
+scan_results/
+*.pdf
+!docs/**/*.pdf
+
+# ============ Logs y bases locales ============
+*.log
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# ============ Alembic ============
+# Las migraciones SI se versionan. Solo se ignora el cache.
+migrations/__pycache__/
+migrations/versions/__pycache__/

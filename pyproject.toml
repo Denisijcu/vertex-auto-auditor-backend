@@ -1,0 +1,32 @@
+[project]
+name = "vertex-auto-auditor-backend"
+version = "0.1.0"
+description = "Motor agéntico para auditoría automatizada de seguridad y optimización SaaS"
+authors = [
+    { name = "Vertex Coders LLC", email = "contact@vertexcoders.com" }
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110.0",
+    "pydantic[email]>=2.6.0",
+    "pydantic-settings>=2.2.0",
+    "uvicorn[standard]>=0.28.0",
+    "sqlalchemy[asyncio]>=2.0.28",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.1",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "httpx>=0.27.0"
+]
+
+[tool.poetry]
+# Dejamos este bloque vacío o solo para configuraciones específicas de empaquetado de Poetry si fueran necesarias
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
