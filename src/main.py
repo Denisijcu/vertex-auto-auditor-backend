@@ -1,71 +1,104 @@
+"""Punto de entrada."""
+from __future__ import annotations
+
+import logging
+import uuid
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+
 from src.config import settings
 from src.core.database import engine
+from src.mcp.server import mcp_server
+from src.routers import companies, mcp_router, reports
 
-# Importaciones de endpoints tradicionales
-from src.routers import companies, reports 
+logging.basicConfig(
+    level=logging.DEBUG if settings.DEBUG else logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("vertex")
 
-# [MCP ROUTER] Importación absoluta desde la arquitectura agéntica
-from src.api.v1 import mcp as mcp_api
-
-# [HARDENING] Importamos la Base declarativa con los modelos registrados en el __init__
-from src.models import Base 
-
-# [MCP REGISTRATION] Forzar la carga de herramientas y recursos para activar los decoradores
-import src.mcp.resources
-import src.mcp.tools
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Manejador del ciclo de vida de Vertex Auto-Auditor.
-    Gestiona la inicialización de recursos y la desconexión segura.
-    """
-    # [START-UP] Acciones al encender el servidor
-    print(f"[VERTEX INFO] Inicializando {settings.PROJECT_NAME} en entorno: {settings.ENVIRONMENT}")
-    
-    # [DATABASE HARDENING] Forzar la creación de las tablas si no existen en Postgres (Async Engine)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    print("[VERTEX INFO] Infraestructura y tablas de base de datos verificadas/creadas con éxito.")
-    
+    logger.info("startup env=%s version=%s", settings.ENVIRONMENT, settings.VERSION)
+    # Base.metadata.create_all ELIMINADO a proposito: pisaba Alembic, dejaba
+    # alembic_version desincronizada y no altera tablas existentes (una columna
+    # nueva reventaba en runtime). Las migraciones se corren como paso previo.
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+    logger.info("database ok, tools=%d resources=%d",
+                len(mcp_server.tools), len(mcp_server.resources))
     yield
-    
-    # [SHUTDOWN] Acciones al apagar el servidor
-    print("[VERTEX INFO] Cerrando recursos y liberando conexiones de base de datos...")
+    logger.info("shutdown")
     await engine.dispose()
 
-# Inicialización de FastAPI con metadatos OpenAPI 3.1
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    version="0.1.0",
-    description="Motor agéntico para auditoría automatizada de seguridad y optimización SaaS.",
-    lifespan=lifespan
+    version=settings.VERSION,
+    description="Motor de auditoria OSINT de superficie publica.",
+    lifespan=lifespan,
+    # En produccion el Swagger es un mapa del ataque: se cierra.
+    docs_url=None if settings.is_production else "/docs",
+    redoc_url=None if settings.is_production else "/redoc",
+    openapi_url=None if settings.is_production else "/openapi.json",
 )
 
-# Inclusión de Routers
-app.include_router(companies.router)
-app.include_router(reports.router)
-
-# [MCP ROUTING] Registro del módulo en el árbol principal
-app.include_router(mcp_api.router)
-
-# Configuración de CORS estricta pero flexible para desarrollo (Netlify/Localhost)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Modificar en producción con los dominios oficiales de Vertex
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=False,  # autenticamos por header, no por cookie
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
-# Endpoints base de verificación de salud (Health check)
+app.include_router(companies.router)
+app.include_router(reports.router)
+app.include_router(mcp_router.router)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Traceback al log con un id; al cliente solo le llega el id.
+    Sin esto, str(e) expone nombres de tablas, columnas y rutas del sistema."""
+    error_id = uuid.uuid4().hex[:12]
+    logger.exception("unhandled id=%s %s %s", error_id, request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"error_id": error_id, "detail": "Error interno del servidor"},
+    )
+
+
 @app.get("/health", tags=["Infrastructure"])
-async def health_check():
-    return {
-        "status": "healthy",
-        "project": settings.PROJECT_NAME,
-        "mcp_ready": True
-    }
+async def liveness():
+    """Liveness: el proceso responde. No toca dependencias."""
+    return {"status": "ok", "version": settings.VERSION}
+
+
+@app.get("/ready", tags=["Infrastructure"])
+async def readiness():
+    """Readiness: las dependencias estan disponibles. Es la que debe mirar el
+    orquestador. El /health de v1 devolvia mcp_ready=True literal y 200 aunque
+    Postgres estuviera caido."""
+    checks: dict = {}
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception:
+        logger.exception("readiness: database down")
+        checks["database"] = "down"
+
+    checks["mcp_tools"] = len(mcp_server.tools)
+    checks["mcp_resources"] = len(mcp_server.resources)
+
+    # tools == 0 delata que los decoradores no se registraron: fallo silencioso
+    # clasico del registro por import con efecto secundario.
+    healthy = checks["database"] == "ok" and checks["mcp_tools"] > 0
+    if not healthy:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=checks)
+    return checks

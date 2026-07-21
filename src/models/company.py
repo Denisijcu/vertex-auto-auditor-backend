@@ -1,23 +1,32 @@
-
 import uuid
-from sqlalchemy import Column, String, DateTime
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+
+from sqlalchemy import Column, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+
 from src.core.database import Base
 
-from src.models.audit_task import AuditTask
 
 class Company(Base):
     __tablename__ = "companies"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id = Column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
     name = Column(String(255), nullable=False)
-    domain = Column(String(255), nullable=False, unique=True, index=True)
+    # Sin unique global: el dominio es unico POR TENANT (ver __table_args__).
+    # Dos clientes distintos pueden auditar el mismo dominio.
+    domain = Column(String(255), nullable=False, index=True)
     industry = Column(String(100), nullable=True)
-    location = Column(JSONB, nullable=True)  # {"city": "Miami", "coordinates": {...}}
+    location = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    # Relaciones
     tasks = relationship("AuditTask", back_populates="company", cascade="all, delete-orphan")
     reports = relationship("AuditReport", back_populates="company", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "domain", name="uq_companies_tenant_domain"),
+    )

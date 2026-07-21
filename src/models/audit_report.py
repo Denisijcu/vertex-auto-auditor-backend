@@ -1,10 +1,3 @@
-"""
-AuditReport — scores ahora nullable.
-
-Antes: `nullable=False, default=100`. Ese default significaba que un reporte
-sin datos se guardaba como 100/100. NULL = "no se pudo determinar", que es
-informacion distinta de 0 y distinta de 100.
-"""
 import uuid
 
 from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String
@@ -19,12 +12,14 @@ class AuditReport(Base):
     __tablename__ = "audit_reports"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    company_id = Column(
-        UUID(as_uuid=True),
-        ForeignKey("companies.id", ondelete="CASCADE"),
-        nullable=False,
+    tenant_id = Column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False, index=True,
     )
-    # NULL = cobertura insuficiente, no evaluable. Nunca asumir 100.
+    company_id = Column(
+        UUID(as_uuid=True), ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
+    # NULL = cobertura insuficiente, no evaluable. Distinto de 0 y de 100.
     security_score = Column(Integer, nullable=True)
     optimization_score = Column(Integer, nullable=True)
     findings = Column(JSONB, nullable=False)
@@ -34,6 +29,5 @@ class AuditReport(Base):
     company = relationship("Company", back_populates="reports")
 
     __table_args__ = (
-        # La consulta caliente es "ultimo reporte de esta compania"
         Index("ix_audit_reports_company_created", "company_id", created_at.desc()),
     )
