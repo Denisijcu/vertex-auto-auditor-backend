@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str | None = Field(default=None)
     ANTHROPIC_API_KEY: str | None = Field(default=None)
 
+    # Directorio de PDFs generados. Debe ser un volumen persistente: si vive
+    # solo en la capa del contenedor, los reportes desaparecen en cada deploy.
+    REPORTS_DIR: str = Field(default="/app/reports")
+
     MCP_SERVER_NAME: str = Field(default="vertex-auditor-mcp")
     MCP_SERVER_VERSION: str = Field(default="0.2.0")
 
