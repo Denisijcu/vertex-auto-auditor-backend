@@ -372,6 +372,93 @@ alembic upgrade head
 
 ---
 
+
+# Añadidos al README
+
+Tres inserciones. Ninguna reemplaza texto existente.
+
+---
+
+## 1. En la sección **Checks implementados**
+
+Justo después del bloque de `DNS (dns.*)` y antes de `TLS`:
+
+```markdown
+> **Hosting compartido.** Si el objetivo es un subdominio de un proveedor
+> (`algo.netlify.app`, `algo.hf.space`, `algo.up.railway.app`…), los checks que
+> dependen de controlar la zona DNS pasan a `not_assessed` con motivo
+> explícito, no a `fail`. El titular de ese subdominio no puede publicar un
+> registro SPF en `netlify.app` aunque quiera: reportarlo sería técnicamente
+> cierto e **inaccionable**.
+>
+> Un hallazgo que el cliente no puede corregir baja la puntuación sin motivo,
+> ocupa espacio en el informe y resta credibilidad a los hallazgos que sí son
+> accionables. Los sufijos están en `src/core/hosting.py`.
+```
+
+---
+
+## 2. En **Arquitectura**, dentro del árbol
+
+Añadir la línea a `src/core/`, manteniendo el orden alfabético:
+
+```text
+    ├── core/
+    │   ├── auth.py             # AuthContext, API keys, scoped()
+    │   ├── csp.py              # Parser de CSP y matching de orígenes
+    │   ├── database.py
+    │   ├── hosting.py          # Sufijos de hosting compartido; zona DNS no controlable
+    │   ├── queue.py            # Pool de Redis compartido
+    │   ├── scoring.py          # vertex-severity-v1
+    │   └── target_guard.py     # Anti-SSRF
+```
+
+---
+
+## 3. Sección nueva, después de **Scoring**
+
+```markdown
+## Hallazgos accionables
+
+Un hallazgo solo se emite si el destinatario del informe puede hacer algo con
+él. Cuando una comprobación falla por una condición que el titular del dominio
+no controla, el resultado es `not_assessed` con el motivo, no un `fail`.
+
+Hoy se aplica a los subdominios de hosting compartido: `src/core/hosting.py`
+mantiene 26 sufijos (Netlify, Vercel, Cloudflare Pages, GitHub Pages, Railway,
+Hugging Face Spaces, Heroku, Firebase, Workers…) y la lista
+`ZONE_DEPENDENT_CHECKS` con las comprobaciones afectadas (`dns.spf` y, cuando
+se implementen, `dns.dmarc`, `dns.dnssec` y `dns.caa`).
+
+La coincidencia exige que el objetivo sea **subdominio** del sufijo:
+`algo.netlify.app` lo es, `netlify.app` no — el proveedor sí controla su propia
+zona. `netlify.app.attacker.com` y `minetlify.app` tampoco coinciden.
+
+No es la Public Suffix List completa, sino una lista curada de los proveedores
+donde la herramienta se usa en la práctica. Ante un proveedor no listado el
+comportamiento es el anterior (se evalúa), que es el lado seguro del error:
+preferible un falso positivo revisable a un falso negativo silencioso.
+
+**Caso que lo originó:** `vertex-kontia.netlify.app` puntuaba 61 con seis
+hallazgos, uno de ellos `VTX-DNS-001` (SPF no publicada). Tras la corrección
+puntúa 71 con cinco, y `dns.spf` aparece como no evaluado explicando por qué.
+`vertexcoders.com`, que sí controla su zona, no varió: sigue en 100 con 21/21.
+
+El fallo solo se hizo visible al auditar un sitio **sano** en hosting
+compartido; los objetivos rotos que se usaban como prueba lo enmascaraban con
+otros hallazgos.
+```
+
+---
+
+## 4. Opcional — en **Hoja de ruta**
+
+Si quieres dejar constancia de lo que queda del tema:
+
+```markdown
+6. Ampliar `ZONE_DEPENDENT_CHECKS` cuando se implementen DMARC, DNSSEC y CAA
+```
+
 ## Licencia
 
 Propietario — Vertex Coders LLC. Todos los derechos reservados.
