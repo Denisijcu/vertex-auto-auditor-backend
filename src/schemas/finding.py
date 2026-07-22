@@ -58,9 +58,30 @@ class AuditReport(BaseModel):
         None, description="None si la cobertura de seguridad fue insuficiente"
     )
     optimization_score: int | None = None
+
+    # Penalizacion SIN el suelo en 0.
+    #
+    # El score se limita a 0 por abajo, asi que dos sitios muy distintos (129 y
+    # 300 de penalizacion) muestran el mismo numero y un cliente que corrige la
+    # mitad de sus problemas no ve ningun avance. Esto si se mueve: es la
+    # metrica de progreso entre auditorias consecutivas.
+    #
+    # Default 0 a proposito: los reportes ya persistidos con el formato
+    # anterior deben seguir deserializando sin romperse.
+    raw_penalty_security: int = 0
+    raw_penalty_optimization: int = 0
+
     verdict: str
     findings: list[Finding] = Field(default_factory=list)
     coverage: dict[str, Any]
+
+    # Lista completa de checks con su estado.
+    #
+    # Sin esto el panel puede dibujar los fallos y los no evaluados, porque
+    # ambos llegan con su id, pero las comprobaciones correctas quedan
+    # anonimas: se sabe cuantas pasaron, no cuales.
+    checks: list[dict[str, Any]] = Field(default_factory=list)
+
     scoring_method: str = Field(
         default="vertex-severity-v1",
         description="Version de la formula de scoring, para trazabilidad entre auditorias",
@@ -72,3 +93,12 @@ class AuditReport(BaseModel):
         for f in self.findings:
             out[f.severity.value] += 1
         return out
+
+    @property
+    def floored(self) -> bool:
+        """True si el suelo en 0 esta ocultando la magnitud real del problema.
+
+        Cuando es True, el score por si solo no sirve para medir progreso:
+        hay que mirar raw_penalty_security.
+        """
+        return self.raw_penalty_security > 100 or self.raw_penalty_optimization > 100

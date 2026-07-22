@@ -7,7 +7,9 @@ y aplica el scoring por categoria, respetando la regla de cobertura.
 from __future__ import annotations
 
 from src.agents.base import Consolidator
-from src.core.scoring import SCORING_VERSION, category_coverage, compute_score, verdict_for
+from src.core.scoring import (
+    SCORING_VERSION, category_coverage, compute_score, raw_penalty, verdict_for,
+)
 from src.schemas.finding import AuditReport, Finding
 from src.schemas.recon import Coverage, ReconResult
 
@@ -37,8 +39,16 @@ class ReportConsolidator(Consolidator):
             target=recon.target,
             security_score=sec_score,
             optimization_score=opt_score,
+            # Penalizacion sin suelo: el score puede estar clavado en 0 mientras
+            # esto baja. Es la unica forma de mostrar progreso al cliente.
+            raw_penalty_security=raw_penalty(sec_findings),
+            raw_penalty_optimization=raw_penalty(opt_findings),
             verdict=verdict_for(sec_score, opt_score),
             findings=all_findings,
             coverage=coverage.model_dump(mode="json"),
+            # Lista completa de checks con su estado. Sin esto el panel puede
+            # dibujar los fallos y los no evaluados, pero las comprobaciones
+            # correctas quedan anonimas: no se pueden nombrar al pasar el cursor.
+            checks=[c.model_dump(mode="json") for c in recon.checks],
             scoring_method=SCORING_VERSION,
         )

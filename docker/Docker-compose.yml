@@ -1,33 +1,58 @@
-
-
 services:
   api:
     build:
       context: ..
       dockerfile: docker/Dockerfile.api
+    command: sh -c "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload"
     ports:
       - "8000:8000"
     volumes:
       - ../src:/app/src
       - ../.env:/app/.env
-      - ../migrations:/app/migrations   
+      - ../migrations:/app/migrations
       - ../alembic.ini:/app/alembic.ini
-
+      - reports_data:/app/reports
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/vertex_auditor
+      - REDIS_URL=redis://redis:6379
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Proceso separado del que atiende HTTP: una auditoria pesada ya no compite
+  # con los requests de la API por el mismo event loop.
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    command: arq src.workers.settings.WorkerSettings
+    volumes:
+      - ../src:/app/src
+      - ../.env:/app/.env
+      - reports_data:/app/reports
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/vertex_auditor
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
   db:
     image: postgres:16-alpine
-    restart: always
+    restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: vertex_auditor
     ports:
-      - "5432:5432"
+      # Solo loopback: no exponer Postgres a la red local.
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -36,5 +61,20 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # appendonly: los trabajos encolados sobreviven a un reinicio de Redis.
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
 volumes:
   postgres_data:
+  redis_data:
+  reports_data:

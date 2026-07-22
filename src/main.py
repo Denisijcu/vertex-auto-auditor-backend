@@ -12,12 +12,14 @@ from sqlalchemy import text
 
 from src.config import settings
 from src.core.database import engine
+from src.core.queue import close_queue, init_queue, queue_healthy
 from src.mcp.server import mcp_server
 from src.routers import companies, mcp_router, reports
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    force=True,   # uvicorn ya instalo handlers; sin force cada log sale dos veces
 )
 logger = logging.getLogger("vertex")
 
@@ -30,10 +32,12 @@ async def lifespan(app: FastAPI):
     # nueva reventaba en runtime). Las migraciones se corren como paso previo.
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
+    await init_queue()
     logger.info("database ok, tools=%d resources=%d",
                 len(mcp_server.tools), len(mcp_server.resources))
     yield
     logger.info("shutdown")
+    await close_queue()
     await engine.dispose()
 
 
@@ -93,12 +97,14 @@ async def readiness():
         logger.exception("readiness: database down")
         checks["database"] = "down"
 
+    checks["queue"] = "ok" if await queue_healthy() else "down"
     checks["mcp_tools"] = len(mcp_server.tools)
     checks["mcp_resources"] = len(mcp_server.resources)
 
     # tools == 0 delata que los decoradores no se registraron: fallo silencioso
     # clasico del registro por import con efecto secundario.
-    healthy = checks["database"] == "ok" and checks["mcp_tools"] > 0
+    healthy = (checks["database"] == "ok" and checks["queue"] == "ok"
+               and checks["mcp_tools"] > 0)
     if not healthy:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=checks)
     return checks

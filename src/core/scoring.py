@@ -17,6 +17,12 @@ Los pesos derivan de rangos CVSS v3.1:
 REGLA DE COBERTURA: si menos del 70% de los checks de una categoria se
 pudieron ejecutar, el score es None. No se publica un numero calculado
 sobre datos que no existen.
+
+SUELO EN 0: el score se limita a 0 por abajo. Eso hace que dos sitios muy
+distintos (129 y 300 de penalizacion) muestren el mismo numero, y que un
+cliente que arregla la mitad de sus problemas no vea ningun avance. Por eso
+se reporta ademas `raw_penalty`, que si se mueve: es la metrica de progreso
+entre auditorias consecutivas.
 """
 from __future__ import annotations
 
@@ -42,6 +48,16 @@ def category_coverage(recon: ReconResult, check_prefixes: tuple[str, ...]) -> tu
     return len(assessed), len(relevant)
 
 
+def raw_penalty(findings: list[Finding]) -> int:
+    """Penalizacion SIN el suelo en 0.
+
+    Es lo unico que permite mostrar progreso cuando el score esta clavado en
+    0: si el cliente arregla dos cabeceras, el score no se mueve pero esto
+    baja de 129 a 109.
+    """
+    return sum(SEVERITY_WEIGHTS[f.severity] for f in findings)
+
+
 def compute_score(
     findings: list[Finding],
     assessed: int,
@@ -56,8 +72,7 @@ def compute_score(
         return None
     if (assessed / total) < threshold:
         return None
-    penalty = sum(SEVERITY_WEIGHTS[f.severity] for f in findings)
-    return max(0, 100 - penalty)
+    return max(0, 100 - raw_penalty(findings))
 
 
 def verdict_for(security: int | None, optimization: int | None) -> str:

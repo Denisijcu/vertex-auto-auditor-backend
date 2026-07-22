@@ -1,135 +1,108 @@
 """
-Router de reportes. Auth obligatoria y aislamiento por tenant en todo acceso.
+Router de reportes.
+
+El pipeline de auditoria vive ahora en src/workers/tasks.py y corre en un
+proceso aparte. Este modulo solo encola, consulta estado y sirve resultados.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from arq.jobs import Job, JobStatus
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agents.optimization_agent import OptimizationAgent
-from src.agents.report_agent import ReportConsolidator
-from src.agents.security_agent import SecurityAgent
 from src.config import settings
 from src.core.auth import AuthContext, Scope, require, scoped
-from src.core.database import AsyncSessionLocal, get_db
+from src.core.database import get_db
+from src.core.queue import get_queue
 from src.models.audit_report import AuditReport as AuditReportModel
 from src.models.audit_task import AuditTask
 from src.models.company import Company
-from src.services.pdf_generator import PDFGenerator
-from src.services.scraper_service import ScraperService
 
 logger = logging.getLogger("vertex.reports")
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
 
-async def _mark_tasks(session: AsyncSession, company_id: UUID, value: str) -> None:
-    stmt = select(AuditTask).where(
-        AuditTask.company_id == company_id,
-        AuditTask.status.in_(["PENDING", "RUNNING"]),
-    )
-    now = datetime.now(timezone.utc)
-    for task in (await session.execute(stmt)).scalars().all():
-        task.status = value
-        if value == "RUNNING":
-            task.started_at = now
-        else:
-            task.completed_at = now
-            if value == "FAILED":
-                task.attempts = (task.attempts or 0) + 1
-
-
-async def pipeline_full_audit(company_id: UUID, domain: str, tenant_id: UUID) -> None:
-    """Pipeline OSINT. Gestiona su propia sesion: get_db es una dependencia de
-    FastAPI, no una factory reutilizable fuera del ciclo de request."""
-    logger.info("audit_start company=%s domain=%s", company_id, domain)
-
-    async with AsyncSessionLocal() as session:
-        try:
-            await _mark_tasks(session, company_id, "RUNNING")
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            logger.exception("no se pudo marcar tareas RUNNING")
-
-    try:
-        recon = await ScraperService().run_full_recon(domain)
-        findings_by_agent = {
-            "security": await SecurityAgent().analyze(recon),
-            "optimization": await OptimizationAgent().analyze(recon),
-        }
-        report = await ReportConsolidator().consolidate(recon, findings_by_agent)
-    except Exception:
-        logger.exception("pipeline fallo domain=%s", domain)
-        async with AsyncSessionLocal() as session:
-            try:
-                await _mark_tasks(session, company_id, "FAILED")
-                await session.commit()
-            except Exception:
-                await session.rollback()
-        return
-
-    payload = report.model_dump(mode="json")
-
-    # El PDF es opcional: render_audit_pdf ya captura sus propios errores y
-    # devuelve None. Un fallo de renderizado no debe impedir persistir el
-    # reporte, que es el dato de valor.
-    pdf_url = await PDFGenerator.render_audit_pdf(
-        payload,
-        reports_dir=settings.REPORTS_DIR,
-        company_id=str(company_id),
-    )
-
-    async with AsyncSessionLocal() as session:
-        try:
-            session.add(AuditReportModel(
-                tenant_id=tenant_id,
-                company_id=company_id,
-                security_score=report.security_score,        # puede ser None
-                optimization_score=report.optimization_score,
-                findings=payload,
-                pdf_url=pdf_url,
-            ))
-            await _mark_tasks(session, company_id, "COMPLETED")
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            logger.exception("persistencia fallo domain=%s", domain)
-            return
-
-    logger.info("audit_done domain=%s sec=%s cov=%s/%s reliable=%s pdf=%s",
-                domain, report.security_score,
-                report.coverage["assessed"], report.coverage["total_checks"],
-                report.coverage["reliable"], bool(pdf_url))
-
-
 @router.post("/trigger/{company_id}", status_code=status.HTTP_202_ACCEPTED)
 async def run_full_audit(
     company_id: UUID,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     ctx: AuthContext = Depends(require(Scope.WRITE)),
 ):
-    # scoped() impide lanzar auditorias contra companias de otro tenant.
+    """Encola la auditoria y devuelve el job_id para hacer polling.
+
+    Antes se usaba BackgroundTasks: el trabajo moria con el proceso, no tenia
+    reintentos y no habia forma de consultar su estado.
+    """
     stmt = scoped(select(Company).where(Company.id == company_id), Company, ctx)
     company = (await db.execute(stmt)).scalar_one_or_none()
     if not company:
         raise HTTPException(404, detail="Compania no encontrada")
 
-    background_tasks.add_task(
-        pipeline_full_audit, company.id, company.domain, ctx.tenant_id
+    # Idempotencia: no se encolan dos auditorias del mismo dominio a la vez.
+    running = await db.execute(
+        select(AuditTask).where(
+            AuditTask.company_id == company_id,
+            AuditTask.status.in_(["PENDING", "RUNNING"]),
+        ).limit(1)
     )
+    if running.scalar_one_or_none():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail="Ya hay una auditoria en curso para esta compania",
+        )
+
+    db.add_all([
+        AuditTask(company_id=company.id, tenant_id=ctx.tenant_id,
+                  agent_type="SECURITY_OSINT", status="PENDING"),
+        AuditTask(company_id=company.id, tenant_id=ctx.tenant_id,
+                  agent_type="SEO_VISIBILITY", status="PENDING"),
+    ])
+    await db.commit()
+
+    job = await get_queue().enqueue_job(
+        "run_audit", str(company.id), company.domain, str(ctx.tenant_id)
+    )
+
     return {
-        "status": "PROCESSING",
+        "status": "QUEUED",
+        "job_id": job.job_id,
         "company_id": str(company.id),
         "domain": company.domain,
+        "poll": f"/reports/jobs/{job.job_id}",
     }
+
+
+@router.get("/jobs/{job_id}")
+async def get_job_status(
+    job_id: str,
+    ctx: AuthContext = Depends(require(Scope.READ)),
+):
+    """Estado de un trabajo encolado. Sustituye al polling a ciegas sobre
+    /latest, que no distinguia 'aun corriendo' de 'fallo'."""
+    job = Job(job_id, redis=get_queue())
+    try:
+        st = await job.status()
+    except Exception:
+        raise HTTPException(404, detail="Trabajo no encontrado")
+
+    if st is JobStatus.not_found:
+        raise HTTPException(404, detail="Trabajo no encontrado o expirado")
+
+    body: dict = {"job_id": job_id, "state": st.value}
+
+    if st is JobStatus.complete:
+        try:
+            body["result"] = await job.result(timeout=0)
+        except Exception as exc:
+            body["state"] = "failed"
+            body["error"] = type(exc).__name__
+    return body
 
 
 @router.get("/{company_id}/latest")
@@ -169,7 +142,7 @@ async def download_report_pdf(
 
     Se sirve POR ID DE REPORTE, no por ruta de archivo. Con un identificador
     opaco no hay superficie de path traversal: el cliente nunca controla una
-    ruta, y la fila que se consulta ya esta acotada al tenant.
+    ruta, y la fila consultada ya esta acotada al tenant.
     """
     stmt = scoped(
         select(AuditReportModel).where(AuditReportModel.id == report_id),
@@ -183,8 +156,8 @@ async def download_report_pdf(
     base = Path(settings.REPORTS_DIR).resolve()
     path = (base / report.pdf_url.lstrip("/")).resolve()
 
-    # Cinturon y tirantes: aunque la ruta salga de la base de datos y no del
-    # cliente, se verifica que no escape del directorio de reportes.
+    # Cinturon y tirantes: la ruta sale de la base y no del cliente, pero si
+    # una fila se corrompiera no debe poder servir nada fuera del directorio.
     if not path.is_relative_to(base) or not path.is_file():
         logger.error("pdf_missing report=%s path=%s", report_id, path)
         raise HTTPException(404, detail="El archivo del reporte no esta disponible")

@@ -8,6 +8,8 @@ Cambios frente a v1:
   - Guard anti-SSRF antes de cualquier request y en cada redirect.
   - Todo fallo produce NOT_ASSESSED con motivo, nunca un default optimista.
   - User-Agent honesto: somos una empresa de auditoria, no evadimos deteccion.
+  - Los checks que dependen de controlar la zona DNS no se evaluan en hosting
+    compartido: el titular no puede corregirlos.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from datetime import datetime, timezone
 import dns.asyncresolver
 import httpx
 
+from src.core.hosting import shared_hosting_suffix, zone_not_controllable_reason
 from src.core.target_guard import ScopeViolation, resolve_and_validate, validate_redirect
 from src.services.content_analyzer import check_csp_self_block, check_not_error_page
 from src.schemas.recon import Check, CheckStatus, ReconResult
@@ -89,9 +92,28 @@ class ScraperService:
                     source="dns",
                 ))
 
-        # SPF / DMARC derivados de TXT, solo si TXT se pudo leer
+        # SPF derivado de TXT, solo si TXT se pudo leer.
+        #
+        # En hosting compartido (algo.netlify.app, algo.hf.space...) el titular
+        # NO controla la zona DNS del sufijo. Reportarle "SPF no publicada" es
+        # tecnicamente cierto e inaccionable: no puede publicar ese registro
+        # aunque quiera. Un hallazgo que el cliente no puede corregir baja el
+        # score sin motivo y resta credibilidad a los que si son accionables.
+        #
+        # Se aplica el principio del motor: no se puede medir != esta mal.
+        shared = shared_hosting_suffix(host)
         txt = next((c for c in checks if c.id == "dns.txt"), None)
-        if txt and txt.assessed:
+
+        if shared:
+            checks.append(Check(
+                id="dns.spf",
+                title="Politica SPF publicada",
+                status=CheckStatus.NOT_ASSESSED,
+                error=zone_not_controllable_reason(shared),
+                evidence={"shared_hosting_suffix": shared},
+                source="dns",
+            ))
+        elif txt and txt.assessed:
             records = [r.lower() for r in txt.evidence.get("records", [])]
             has_spf = any("v=spf1" in r for r in records)
             checks.append(Check(
@@ -243,7 +265,6 @@ class ScraperService:
             return self._http_all_not_assessed(err)
 
         h = {k.lower(): v for k, v in resp.headers.items()}
-        # Cuerpo acotado: 512 KB bastan para <head> y las etiquetas de recursos.
         content_type = h.get("content-type", "")
         is_html = "html" in content_type
         # Cuerpo acotado: 512 KB bastan para <head> y las etiquetas de recursos.

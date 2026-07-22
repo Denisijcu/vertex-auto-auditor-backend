@@ -29,6 +29,15 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str | None = Field(default=None)
     ANTHROPIC_API_KEY: str | None = Field(default=None)
 
+    # ---- Cola de trabajos ----
+    REDIS_URL: str = Field(default="redis://redis:6379")
+    # Auditorias concurrentes por worker. Es el backpressure que
+    # BackgroundTasks no tenia.
+    WORKER_CONCURRENCY: int = Field(default=5)
+    # Cota superior por trabajo: un target que cuelga no ocupa un slot para siempre.
+    WORKER_JOB_TIMEOUT: int = Field(default=180)
+    WORKER_MAX_TRIES: int = Field(default=3)
+
     # Directorio de PDFs generados. Debe ser un volumen persistente: si vive
     # solo en la capa del contenedor, los reportes desaparecen en cada deploy.
     REPORTS_DIR: str = Field(default="/app/reports")
