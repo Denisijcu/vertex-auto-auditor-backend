@@ -154,6 +154,75 @@ async def get_latest_report(
     }
 
 
+@router.get("/{company_id}/history")
+async def get_report_history(
+    company_id: UUID,
+    limit: int = 30,
+    db: AsyncSession = Depends(get_db),
+    ctx: AuthContext = Depends(require(Scope.READ)),
+):
+    """Linea temporal de auditorias de una compania.
+
+    Devuelve solo lo necesario para dibujar la evolucion: puntuacion,
+    penalizacion, cobertura y recuento de hallazgos. El payload completo de
+    cada informe pesa decenas de KB y aqui no hace falta.
+    """
+    limit = max(1, min(limit, 100))
+
+    stmt = scoped(
+        select(AuditReportModel)
+        .where(AuditReportModel.company_id == company_id)
+        .order_by(AuditReportModel.created_at.desc())
+        .limit(limit),
+        AuditReportModel, ctx,
+    )
+    reports = (await db.execute(stmt)).scalars().all()
+
+    if not reports:
+        raise HTTPException(404, detail="Sin reportes para esta compania")
+
+    entries = []
+    for r in reports:
+        p = r.findings or {}
+        cov = p.get("coverage", {}) or {}
+        # Un informe anterior a `checks[]` no se puede interpretar con las
+        # reglas actuales. Se marca en lugar de mezclarlo con los demas.
+        legacy = "security_score" not in p
+
+        entries.append({
+            "report_id": str(r.id),
+            "audited_at": r.created_at.isoformat(),
+            "security_score": None if legacy else p.get("security_score"),
+            "optimization_score": None if legacy else p.get("optimization_score"),
+            "raw_penalty": p.get("raw_penalty_security"),
+            "verdict": p.get("verdict"),
+            "findings_count": len(p.get("findings", []) or []),
+            "severity_counts": _severity_counts(p.get("findings", []) or []),
+            "coverage": {
+                "assessed": cov.get("assessed"),
+                "total": cov.get("total_checks"),
+                "reliable": cov.get("reliable"),
+            },
+            "fingerprint": None if legacy else fingerprint(p),
+            "has_pdf": bool(r.pdf_url),
+            "legacy": legacy,
+        })
+
+    return {
+        "target": (reports[0].findings or {}).get("target"),
+        "count": len(entries),
+        # Mas reciente primero: es el orden en que se consulta.
+        "entries": entries,
+    }
+
+
+def _severity_counts(findings: list[dict]) -> dict[str, int]:
+    out = {s: 0 for s in ("critical", "high", "medium", "low", "info")}
+    for f in findings:
+        sev = f.get("severity", "info")
+        out[sev] = out.get(sev, 0) + 1
+    return out
+
 @router.get("/{company_id}/diff")
 async def get_report_diff(
     company_id: UUID,
