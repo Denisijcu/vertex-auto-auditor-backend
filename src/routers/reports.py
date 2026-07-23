@@ -24,6 +24,9 @@ from src.models.audit_report import AuditReport as AuditReportModel
 from src.models.audit_task import AuditTask
 from src.models.company import Company
 
+
+from src.core.diff import compare, fingerprint
+
 logger = logging.getLogger("vertex.reports")
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
@@ -104,7 +107,6 @@ async def get_job_status(
             body["error"] = type(exc).__name__
     return body
 
-
 @router.get("/{company_id}/latest")
 async def get_latest_report(
     company_id: UUID,
@@ -122,15 +124,100 @@ async def get_latest_report(
     if not report:
         raise HTTPException(404, detail="Sin reportes para esta compania")
 
+    # FUENTE UNICA DE VERDAD: el payload, no la columna.
+    #
+    # `audit_reports.security_score` es un indice desnormalizado para poder
+    # listar sin deserializar el JSONB. Puede desincronizarse del payload, y
+    # cuando eso pasa gana la columna, que es la fuente menos fiable.
+    #
+    # Caso real (reporte del 20/07 de dentiapro.com): la columna decia 80 y el
+    # payload no tenia ni `security_score` ni `target`. Ese 80 lo produjo la
+    # version del motor anterior al scoring documentado, y no se podia
+    # reconstruir desde ninguna evidencia. Un null publicandose como 80 le dice
+    # al cliente "estas bastante bien" cuando la verdad es "no medi nada".
+    #
+    # Es el principio del motor aplicado a la capa de lectura: si no se puede
+    # reconstruir desde la evidencia, no se publica.
+    payload = report.findings or {}
+    has_payload_score = "security_score" in payload
+
     return {
         "report_id": str(report.id),
-        "security_score": report.security_score,
-        "optimization_score": report.optimization_score,
-        "findings": report.findings,
+        "security_score": payload.get("security_score") if has_payload_score else None,
+        "optimization_score": payload.get("optimization_score") if has_payload_score else None,
+        "findings": payload,
+        # Distingue "no se pudo medir" de "reporte de una version anterior del
+        # motor". Sin esta bandera, el panel y el MCP los muestran igual.
+        "legacy": not has_payload_score,
         "pdf_url": f"/reports/{report.id}/pdf" if report.pdf_url else None,
         "created_at": report.created_at.isoformat(),
     }
 
+
+@router.get("/{company_id}/diff")
+async def get_report_diff(
+    company_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    ctx: AuthContext = Depends(require(Scope.READ)),
+):
+    """Compara las dos ultimas auditorias de una compania.
+
+    Es lo que convierte un informe puntual en un servicio: no "esto tienes mal
+    hoy" sino "esto cambio desde la ultima vez".
+    """
+    stmt = scoped(
+        select(AuditReportModel)
+        .where(AuditReportModel.company_id == company_id)
+        .order_by(AuditReportModel.created_at.desc())
+        .limit(2),
+        AuditReportModel, ctx,
+    )
+    reports = (await db.execute(stmt)).scalars().all()
+
+    if not reports:
+        raise HTTPException(404, detail="Sin reportes para esta compania")
+    if len(reports) < 2:
+        return {
+            "comparable": False,
+            "reason": "Solo hay una auditoria de este dominio. La comparacion "
+                      "requiere al menos dos.",
+            "current": {
+                "report_id": str(reports[0].id),
+                "audited_at": reports[0].created_at.isoformat(),
+                "security_score": (reports[0].findings or {}).get("security_score"),
+            },
+        }
+
+    current, previous = reports[0], reports[1]
+
+    curr_payload = current.findings or {}
+    prev_payload = previous.findings or {}
+
+    # Los reportes anteriores a `checks[]` no permiten distinguir un hallazgo
+    # corregido de uno que dejo de medirse. Antes que producir un diff que
+    # parece fiable y no lo es, se declara no comparable.
+    if "security_score" not in prev_payload or "security_score" not in curr_payload:
+        return {
+            "comparable": False,
+            "reason": "Uno de los informes se genero con una version anterior "
+                      "del motor y no contiene los datos necesarios para "
+                      "compararlo. Vuelve a auditar para obtener una "
+                      "comparacion fiable.",
+        }
+
+    return compare(
+        prev_payload, curr_payload,
+        previous_meta={
+            "report_id": str(previous.id),
+            "created_at": previous.created_at.isoformat(),
+            "fingerprint": fingerprint(prev_payload),
+        },
+        current_meta={
+            "report_id": str(current.id),
+            "created_at": current.created_at.isoformat(),
+            "fingerprint": fingerprint(curr_payload),
+        },
+    )
 
 @router.get("/{report_id}/pdf")
 async def download_report_pdf(

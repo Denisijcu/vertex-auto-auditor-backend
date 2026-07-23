@@ -13,3 +13,4 @@ weasyprint>=61.2
 dnspython==2.6.1
 reportlab>=4.0
 arq>=0.26
+mcp[cli]>=1.28,<2

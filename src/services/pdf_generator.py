@@ -290,6 +290,10 @@ class PDFGenerator:
             "detectaron problemas, no que el sistema sea seguro.",
             "El alcance cubre la superficie expuesta a internet. No incluye revisión "
             "de código, configuración interna ni controles organizativos.",
+            "El análisis de la política de seguridad de contenidos es estático: "
+            "contrasta el documento servido contra la política declarada. No "
+            "detecta violaciones que solo se manifiestan al ejecutar la aplicación "
+            "en un navegador."
         ):
             story.append(Paragraph(f"• {lim}", st["body"]))
 
