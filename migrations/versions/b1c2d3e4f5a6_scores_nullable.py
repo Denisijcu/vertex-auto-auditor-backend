@@ -19,12 +19,6 @@ def upgrade() -> None:
     op.alter_column("audit_reports", "optimization_score",
                     existing_type=sa.Integer(), nullable=True, server_default=None)
 
-    op.create_index(
-        "ix_audit_reports_company_created",
-        "audit_reports",
-        ["company_id", sa.text("created_at DESC")],
-    )
-
     # Trazabilidad de fallos en el pipeline
     op.add_column("audit_tasks", sa.Column("error", sa.Text(), nullable=True))
     op.add_column("audit_tasks",
@@ -34,7 +28,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_column("audit_tasks", "attempts")
     op.drop_column("audit_tasks", "error")
-    op.drop_index("ix_audit_reports_company_created", table_name="audit_reports")
     op.alter_column("audit_reports", "optimization_score",
                     existing_type=sa.Integer(), nullable=False, server_default="100")
     op.alter_column("audit_reports", "security_score",
