@@ -114,7 +114,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
-@app.get("/x", tags=["Infrastructure"])
+@app.get("/", tags=["Infrastructure"])
 async def root():
     """Identifica el servicio.
 
