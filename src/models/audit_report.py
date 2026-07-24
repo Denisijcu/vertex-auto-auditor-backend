@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, LargeBinary
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -24,6 +24,7 @@ class AuditReport(Base):
     optimization_score = Column(Integer, nullable=True)
     findings = Column(JSONB, nullable=False)
     pdf_url = Column(String(512), nullable=True)
+    pdf_bytes = Column(LargeBinary, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     company = relationship("Company", back_populates="reports")

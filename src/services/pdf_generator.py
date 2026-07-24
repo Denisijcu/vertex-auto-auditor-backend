@@ -109,8 +109,17 @@ class PDFGenerator:
     @classmethod
     def build(cls, payload: dict[str, Any], out_path: Path) -> str:
         st = _styles()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # out puede ser un Path (disco) o un BytesIO (memoria). SimpleDocTemplate
+        # acepta ambos: una ruta str o un objeto con .write().
+        if isinstance(out_path, Path):
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+           
+            target_out = str(out_path)
+        else:
+            target_out = out_path
+
+       
         target = payload.get("target", "desconocido")
         coverage = payload.get("coverage", {}) or {}
         findings = payload.get("findings", []) or []
@@ -119,7 +128,7 @@ class PDFGenerator:
         issued = datetime.now(timezone.utc)
 
         doc = SimpleDocTemplate(
-            str(out_path), pagesize=A4,
+            str(target_out), pagesize=A4,
             leftMargin=20 * mm, rightMargin=20 * mm,
             topMargin=18 * mm, bottomMargin=20 * mm,
             title=f"Auditoria OSINT - {target}",
@@ -384,27 +393,24 @@ class PDFGenerator:
     # ------------------------------------------------------------------ API
 
     @classmethod
-    async def render_audit_pdf(
-        cls, payload: dict[str, Any], *, reports_dir: str = "/app/reports",
-        company_id: str | None = None,
-    ) -> str | None:
-        """Genera el PDF y devuelve la ruta relativa servible.
+    async def render_audit_pdf_bytes(cls, payload: dict[str, Any]) -> bytes | None:
+        """Genera el PDF en memoria y devuelve los bytes.
 
-        Devuelve None si falla: el reporte debe persistirse igual, con pdf_url
-        en NULL. Un PDF roto no puede tumbar la auditoria.
+        No escribe a disco: en Railway el worker y el servicio web tienen
+        discos separados, asi que el archivo nunca llegaba al lado que lo
+        sirve. Los bytes se guardan en la base junto al informe.
+
+        Devuelve None si falla: el reporte se persiste igual, con pdf_bytes en
+        NULL. Un PDF roto no puede tumbar la auditoria.
         """
+        from io import BytesIO
         try:
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            safe = "".join(c if c.isalnum() or c in "-." else "_"
-                           for c in payload.get("target", "target"))
-            name = f"{safe}-{stamp}.pdf"
-            path = Path(reports_dir) / (company_id or "shared") / name
-            cls.build(payload, path)
-            # Ruta RELATIVA a REPORTS_DIR. Se guarda asi para que mover el
-            # directorio no invalide las filas ya escritas en la base.
-            rel = f"{company_id or 'shared'}/{name}"
-            logger.info("pdf_generated path=%s", path)
-            return rel
+            buffer = BytesIO()
+            cls.build(payload, buffer)
+            data = buffer.getvalue()
+            logger.info("pdf_generated target=%s bytes=%d",
+                        payload.get("target"), len(data))
+            return data
         except Exception:
             logger.exception("pdf_generation_failed target=%s", payload.get("target"))
             return None
