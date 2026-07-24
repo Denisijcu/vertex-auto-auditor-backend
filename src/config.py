@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = Field(default="Vertex Auto-Auditor SaaS")
-    VERSION: str = Field(default="0.2.0")
+    VERSION: str = Field(default="0.3.0")
 
     # development | staging | production
     ENVIRONMENT: str = Field(default="production")
@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     REPORTS_DIR: str = Field(default="/app/reports")
 
     MCP_SERVER_NAME: str = Field(default="vertex-auditor-mcp")
-    MCP_SERVER_VERSION: str = Field(default="0.2.0")
+    MCP_SERVER_VERSION: str = Field(default="0.3.0")
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -55,6 +55,27 @@ class Settings(BaseSettings):
         v = v.lower().strip()
         if v not in ("development", "staging", "production"):
             raise ValueError(f"ENVIRONMENT invalido: {v}")
+        return v
+
+    @field_validator("DATABASE_URL")
+    @classmethod
+    def _async_driver(cls, v: str) -> str:
+        """Normaliza el esquema al driver asincrono.
+
+        Railway inyecta DATABASE_URL con `postgresql://`, que es lo que espera
+        psycopg. SQLAlchemy en modo asyncio necesita el driver explicito, y sin
+        esto el arranque falla con "The asyncio extension requires an async
+        driver". Se reescribe aqui en vez de obligar a recordar el formato
+        correcto en cada entorno.
+
+        El primer `if` cubre el esquema `postgres://` heredado que algunos
+        proveedores todavia inyectan.
+        """
+        v = v.strip()
+        if v.startswith("postgres://"):
+            v = v.replace("postgres://", "postgresql://", 1)
+        if v.startswith("postgresql://"):
+            v = v.replace("postgresql://", "postgresql+asyncpg://", 1)
         return v
 
     @property
