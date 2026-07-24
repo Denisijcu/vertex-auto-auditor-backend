@@ -81,34 +81,93 @@ def _client() -> httpx.AsyncClient:
 
 
 async def _request(method: str, path: str, **kw: Any) -> Any:
-    """Llama a la API y traduce los errores a mensajes accionables.
+    """Llama a la API y traduce TODO fallo a un mensaje accionable.
 
-    Un modelo no puede hacer nada con un 403 pelado; si con "esta clave no
-    tiene permiso de escritura".
+    Ninguna excepcion sale de aqui sin texto. Antes solo se capturaba
+    ConnectError, asi que un ConnectTimeout o un ReadError se propagaban
+    crudos: FastMCP los renderiza con str(e), que en esas excepciones de httpx
+    es cadena vacia. El agente recibia "Error executing tool list_domains:"
+    sin nada detras y no podia distinguir una base caida de un token invalido
+    — que desde su lado son acciones completamente distintas.
     """
-    async with _client() as c:
-        try:
+    try:
+        async with _client() as c:
             r = await c.request(method, path, **kw)
-        except httpx.ConnectError as e:
-            raise ApiError(f"No hay conexion con el motor en {API_URL}") from e
+    except ApiError:
+        raise
+    except httpx.ConnectError as e:
+        raise ApiError(
+            f"No hay conexion con el motor en {API_URL}. "
+            f"Comprueba que el backend esta levantado. ({type(e).__name__})"
+        ) from e
+    except httpx.TimeoutException as e:
+        raise ApiError(
+            f"El motor en {API_URL} no respondio a tiempo. Puede estar "
+            f"arrancando, o la base de datos no responder. ({type(e).__name__})"
+        ) from e
+    except httpx.HTTPError as e:
+        raise ApiError(
+            f"Fallo de transporte hablando con {API_URL}: "
+            f"{type(e).__name__}: {e or 'sin detalle'}"
+        ) from e
+    except Exception as e:
+        raise ApiError(
+            f"Error inesperado llamando a {path}: "
+            f"{type(e).__name__}: {e or 'sin detalle'}"
+        ) from e
 
-        if r.status_code == 401:
-            raise ApiError("La API key no es valida o fue revocada.")
-        if r.status_code == 403:
-            raise ApiError("Esta API key no tiene permiso para esta operacion.")
-        if r.status_code == 404:
-            raise ApiError("No encontrado.")
-        if r.status_code == 409:
-            detail = r.json().get("detail")
-            raise ApiError(detail if isinstance(detail, str) else "Conflicto.")
-        if r.status_code == 422:
-            raise ApiError(f"El motor rechazo los datos: {r.text[:300]}")
-        if r.status_code >= 500:
-            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-            ref = body.get("error_id", "")
-            raise ApiError(f"Error del motor{f' (ref {ref})' if ref else ''}.")
-        r.raise_for_status()
-        return r.json() if r.content else None
+    if r.status_code == 401:
+        raise ApiError(
+            "La API key no es valida o fue revocada. Genera una nueva con "
+            "create_api_key y actualiza VERTEX_API_KEY."
+        )
+    if r.status_code == 403:
+        raise ApiError("Esta API key no tiene permiso para esta operacion.")
+    if r.status_code == 404:
+        raise ApiError(f"No encontrado: {path}")
+    if r.status_code == 409:
+        detail = _detail(r)
+        raise ApiError(detail or "Conflicto: la operacion ya esta en curso.")
+    if r.status_code == 422:
+        raise ApiError(f"El motor rechazo los datos enviados: {r.text[:300]}")
+    if r.status_code >= 500:
+        # El backend devuelve error_id en los 500 y guarda el traceback en su
+        # log. Se propaga esa referencia: es lo unico que permite cruzar el
+        # fallo con el registro del servidor.
+        ref = ""
+        try:
+            ref = r.json().get("error_id", "")
+        except Exception:
+            pass
+        msg = f"Error interno del motor (HTTP {r.status_code})"
+        if ref:
+            msg += f", referencia {ref}"
+        raise ApiError(msg + ".")
+    if r.status_code >= 400:
+        raise ApiError(f"HTTP {r.status_code} en {path}: {r.text[:200]}")
+
+    if not r.content:
+        return None
+    try:
+        return r.json()
+    except Exception as e:
+        raise ApiError(
+            f"El motor devolvio una respuesta no interpretable en {path} "
+            f"({type(e).__name__}). Primeros caracteres: {r.text[:120]!r}"
+        ) from e
+
+
+def _detail(r: httpx.Response) -> str | None:
+    """Extrae `detail` de la respuesta si es texto legible."""
+    try:
+        d = r.json().get("detail")
+    except Exception:
+        return None
+    if isinstance(d, str):
+        return d
+    if isinstance(d, dict):
+        return d.get("message")
+    return None
 
 
 async def _find_company(domain: str) -> dict | None:
@@ -300,6 +359,121 @@ async def get_report(domain: str) -> dict:
     summary["report_id"] = rep["report_id"]
     summary["audited_at"] = rep["created_at"]
     return summary
+
+
+@mcp.tool()
+async def compare_audits(domain: str) -> dict:
+    """Compara las dos ultimas auditorias de un dominio.
+
+    Responde "que cambio desde la ultima vez", no "que hay mal hoy".
+
+    AL INTERPRETAR EL RESULTADO, la distincion que importa:
+
+      - `resolved`     -> la comprobacion volvio a ejecutarse y ahora pasa.
+                          El problema esta corregido.
+      - `unverifiable` -> el hallazgo desaparecio porque la comprobacion DEJO
+                          DE PODER EJECUTARSE. NO esta corregido: dejo de
+                          medirse. Reportarlo como una mejora es falso.
+
+    Un `score_delta` positivo con hallazgos en `unverifiable` NO es
+    necesariamente una mejora: puede ser una perdida de cobertura.
+
+    Ademas, `penalty_delta` no tiene suelo. Cuando la puntuacion esta clavada
+    en 0, esta cifra es la unica que refleja progreso real.
+
+    Args:
+        domain: dominio ya registrado, por ejemplo "ejemplo.com".
+    """
+    company = await _find_company(domain)
+    if not company:
+        raise ApiError(f"El dominio {domain} no esta registrado.")
+
+    d = await _request("GET", f"/reports/{company['id']}/diff")
+
+    if d.get("comparable") is False:
+        return {"comparable": False, "reason": d.get("reason")}
+
+    cov = d.get("coverage_changes", {})
+    return {
+        "target": d.get("target"),
+        "verdict": d.get("verdict"),
+        "headline": d.get("headline"),
+        "unchanged": d.get("same_fingerprint"),
+        "previous": {
+            "audited_at": d["previous"]["audited_at"],
+            "score": d["previous"]["security_score"],
+            "penalty": d["previous"]["raw_penalty"],
+            "coverage": f"{d['previous']['coverage']['assessed']}/{d['previous']['coverage']['total']}",
+        },
+        "current": {
+            "audited_at": d["current"]["audited_at"],
+            "score": d["current"]["security_score"],
+            "penalty": d["current"]["raw_penalty"],
+            "coverage": f"{d['current']['coverage']['assessed']}/{d['current']['coverage']['total']}",
+        },
+        "score_delta": d.get("score_delta"),
+        "penalty_delta": d.get("penalty_delta"),
+        "score_note": d.get("score_note"),
+        "resolved": d["findings"]["resolved"],
+        # Separados de `resolved` a proposito: no se corrigieron.
+        "unverifiable": d["findings"]["unverifiable"],
+        "new": d["findings"]["new"],
+        "still_present": d["findings"]["persisting"],
+        "counts": d.get("counts"),
+        "coverage_comparable": cov.get("comparable"),
+        "checks_lost": cov.get("checks_lost"),
+        "checks_gained": cov.get("checks_gained"),
+    }
+
+
+@mcp.tool()
+async def audit_history(domain: str, limit: int = 15) -> dict:
+    """Linea temporal de auditorias de un dominio.
+
+    Util para responder "como ha evolucionado" o "cuando se rompio esto".
+
+    AVISO AL COMPARAR ENTRADAS: el campo `total_checks` puede variar entre
+    auditorias cuando se añaden comprobaciones al motor. Dos puntuaciones
+    medidas contra distinto denominador no son estrictamente comparables,
+    aunque el numero se parezca. Las entradas marcan `scale_changed` cuando eso
+    ocurre.
+
+    Las entradas con `legacy: true` proceden de una version anterior del motor
+    y no contienen los datos necesarios para interpretarlas.
+
+    Args:
+        domain: dominio ya registrado.
+        limit: numero maximo de auditorias a devolver.
+    """
+    company = await _find_company(domain)
+    if not company:
+        raise ApiError(f"El dominio {domain} no esta registrado.")
+
+    h = await _request("GET", f"/reports/{company['id']}/history",
+                       params={"limit": max(1, min(limit, 100))})
+
+    entries = h.get("entries", [])
+    out = []
+    prev_total = None
+    # El historial llega de mas reciente a mas antiguo; se recorre al reves
+    # para poder comparar cada entrada con la que la precede en el tiempo.
+    for e in reversed(entries):
+        total = e.get("coverage", {}).get("total")
+        out.append({
+            "audited_at": e["audited_at"],
+            "score": e["security_score"],
+            "penalty": e.get("raw_penalty"),
+            "verdict": e.get("verdict"),
+            "findings_count": e["findings_count"],
+            "assessed": e.get("coverage", {}).get("assessed"),
+            "total_checks": total,
+            "scale_changed": prev_total is not None and total != prev_total,
+            "legacy": e.get("legacy", False),
+        })
+        prev_total = total
+
+    out.reverse()
+    return {"target": h.get("target"), "count": h.get("count"), "entries": out}
 
 
 @mcp.tool()
