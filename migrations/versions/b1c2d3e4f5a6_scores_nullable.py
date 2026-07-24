@@ -19,15 +19,47 @@ def upgrade() -> None:
     op.alter_column("audit_reports", "optimization_score",
                     existing_type=sa.Integer(), nullable=True, server_default=None)
 
-    # Trazabilidad de fallos en el pipeline
-    op.add_column("audit_tasks", sa.Column("error", sa.Text(), nullable=True))
-    op.add_column("audit_tasks",
-                  sa.Column("attempts", sa.Integer(), nullable=False, server_default="0"))
+    # Trazabilidad de fallos en el pipeline - idempotent using raw SQL
+    op.execute("""
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'audit_tasks' AND column_name = 'error'
+        ) THEN
+            ALTER TABLE audit_tasks ADD COLUMN error TEXT NULL;
+        END IF;
+        
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'audit_tasks' AND column_name = 'attempts'
+        ) THEN
+            ALTER TABLE audit_tasks ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+        END IF;
+    END $$;
+    """)
 
 
 def downgrade() -> None:
-    op.drop_column("audit_tasks", "attempts")
-    op.drop_column("audit_tasks", "error")
+    op.execute("""
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'audit_tasks' AND column_name = 'attempts'
+        ) THEN
+            ALTER TABLE audit_tasks DROP COLUMN attempts;
+        END IF;
+        
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'audit_tasks' AND column_name = 'error'
+        ) THEN
+            ALTER TABLE audit_tasks DROP COLUMN error;
+        END IF;
+    END $$;
+    """)
+    
     op.alter_column("audit_reports", "optimization_score",
                     existing_type=sa.Integer(), nullable=False, server_default="100")
     op.alter_column("audit_reports", "security_score",
