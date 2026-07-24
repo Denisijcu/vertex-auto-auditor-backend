@@ -3,22 +3,20 @@
 Crea companies, audit_tasks y audit_reports.
 
 MOTIVO: esta migracion se genero con --autogenerate cuando las tablas YA
-existian, creadas por `Base.metadata.create_all` en el lifespan. Alembic
+existian, creadas por Base.metadata.create_all en el lifespan. Alembic
 comparo modelos contra base, no encontro diferencias, y produjo un archivo
 con el nombre correcto y el cuerpo vacio.
 
 En las bases donde create_all habia corrido no se noto. En una base limpia
-la cadena arrancaba alterando una tabla que nunca se creo:
-
-    relation "audit_reports" does not exist
-    [SQL: ALTER TABLE audit_reports ALTER COLUMN security_score DROP NOT NULL]
+la cadena arrancaba alterando una tabla que nunca se creo.
 
 El esquema aqui es el ANTERIOR a las dos migraciones siguientes:
-  - b1c2d3e4f5a6 hace nullable las puntuaciones
+  - b1c2d3e4f5a6 hace nullable las puntuaciones y crea el indice compuesto
   - c2d3e4f5a6b7 anade tenants, api_keys y tenant_id
 
-Por eso security_score sale NOT NULL y no hay tenant_id: reproduce el estado
-original para que las migraciones posteriores tengan algo que alterar.
+Por eso security_score sale NOT NULL, no hay tenant_id, y no se crea el
+indice ix_audit_reports_company_created: cada una de esas cosas es trabajo
+de una migracion posterior.
 
 Revision ID: af3ccb6abf9f
 Revises:
@@ -85,15 +83,9 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True),
                   server_default=sa.text("now()")),
     )
-    op.create_index(
-        "ix_audit_reports_company_created",
-        "audit_reports",
-        ["company_id", sa.text("created_at DESC")],
-    )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_audit_reports_company_created", table_name="audit_reports")
     op.drop_table("audit_reports")
     op.drop_index("ix_audit_tasks_company", table_name="audit_tasks")
     op.drop_table("audit_tasks")
