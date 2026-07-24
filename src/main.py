@@ -28,8 +28,7 @@ logger = logging.getLogger("vertex")
 async def lifespan(app: FastAPI):
     logger.info("startup env=%s version=%s", settings.ENVIRONMENT, settings.VERSION)
     # Base.metadata.create_all ELIMINADO a proposito: pisaba Alembic, dejaba
-    # alembic_version desincronizada y no altera tablas existentes (una columna
-    # nueva reventaba en runtime). Las migraciones se corren como paso previo.
+    # alembic_version desincronizada y no altera tablas existentes.
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
     await init_queue()
@@ -51,6 +50,44 @@ app = FastAPI(
     redoc_url=None if settings.is_production else "/redoc",
     openapi_url=None if settings.is_production else "/openapi.json",
 )
+
+
+# Rutas que sirven HTML y necesitan cargar recursos externos. La politica
+# estricta de abajo las romperia.
+_HTML_PATHS = ("/docs", "/redoc", "/openapi.json")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """Cabeceras de seguridad en toda respuesta.
+
+    Una API JSON no renderiza nada en el navegador, asi que la politica puede
+    ser mas estricta que la de un sitio web: `default-src 'none'` porque este
+    servicio no sirve ningun recurso.
+
+    Se exceptua Swagger, que si es HTML y carga JS y CSS de un CDN. En
+    produccion esas rutas estan cerradas y la excepcion no aplica.
+    """
+    response = await call_next(request)
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    # HSTS solo tiene sentido sobre HTTPS. En local sobre http es ruido.
+    if settings.is_production:
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
+        )
+
+    if not request.url.path.startswith(_HTML_PATHS):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+        )
+
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -77,6 +114,26 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
+@app.get("/", tags=["Infrastructure"])
+async def root():
+    """Identifica el servicio.
+
+    Sin esta ruta, FastAPI devuelve 404 en la raiz. Para un cliente HTTP eso
+    es indistinguible de un servicio caido o mal desplegado, y cualquier
+    monitor externo —incluido este mismo auditor— lo reporta como hallazgo
+    critico. Una API debe decir que es al ser preguntada.
+    """
+    return {
+        "service": settings.PROJECT_NAME,
+        "version": settings.VERSION,
+        "description": "Motor de auditoria OSINT de superficie publica",
+        "vendor": "Vertex Coders LLC",
+        "health": "/health",
+        "ready": "/ready",
+        "docs": None if settings.is_production else "/docs",
+    }
+
+
 @app.get("/health", tags=["Infrastructure"])
 async def liveness():
     """Liveness: el proceso responde. No toca dependencias."""
@@ -86,8 +143,7 @@ async def liveness():
 @app.get("/ready", tags=["Infrastructure"])
 async def readiness():
     """Readiness: las dependencias estan disponibles. Es la que debe mirar el
-    orquestador. El /health de v1 devolvia mcp_ready=True literal y 200 aunque
-    Postgres estuviera caido."""
+    orquestador."""
     checks: dict = {}
     try:
         async with engine.connect() as conn:
