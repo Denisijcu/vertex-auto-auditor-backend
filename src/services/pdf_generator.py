@@ -128,7 +128,7 @@ class PDFGenerator:
         issued = datetime.now(timezone.utc)
 
         doc = SimpleDocTemplate(
-            str(target_out), pagesize=A4,
+            target_out, pagesize=A4,
             leftMargin=20 * mm, rightMargin=20 * mm,
             topMargin=18 * mm, bottomMargin=20 * mm,
             title=f"Auditoria OSINT - {target}",
