@@ -96,9 +96,8 @@ async def run_audit(
 
     # El PDF captura sus propios errores y devuelve None: un fallo de
     # renderizado no puede impedir persistir el reporte, que es el dato de valor.
-    pdf_url = await PDFGenerator.render_audit_pdf(
-        payload, reports_dir=settings.REPORTS_DIR, company_id=company_id
-    )
+    pdf_bytes = await PDFGenerator.render_audit_pdf_bytes(payload)
+    
 
     async with AsyncSessionLocal() as session:
         try:
@@ -106,7 +105,7 @@ async def run_audit(
                 tenant_id=tid, company_id=cid,
                 security_score=report.security_score,
                 optimization_score=report.optimization_score,
-                findings=payload, pdf_url=pdf_url,
+                findings=payload, pdf_bytes=pdf_bytes,
             )
             session.add(row)
             await session.commit()
@@ -135,5 +134,5 @@ async def run_audit(
         "optimization_score": report.optimization_score,
         "coverage": report.coverage,
         "findings_count": len(report.findings),
-        "pdf_available": bool(pdf_url),
+        "pdf_available": bool(pdf_bytes),
     }
