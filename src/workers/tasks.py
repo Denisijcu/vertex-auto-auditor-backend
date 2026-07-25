@@ -63,17 +63,23 @@ async def _set_tasks(company_id: UUID, status: str, error: str | None = None) ->
 
 
 async def run_audit(
-    ctx: dict, company_id: str, domain: str, tenant_id: str
+    ctx: dict, company_id: str, domain: str, tenant_id: str,
+    target_type: str = "website",
 ) -> dict:
-    """Job principal. `ctx` lo inyecta ARQ e incluye job_try para el backoff."""
+    """Job principal. `ctx` lo inyecta ARQ e incluye job_try para el backoff.
+
+    target_type ('website' | 'api') se declara al registrar el dominio y modula
+    que checks aplican. Default 'website' para jobs encolados antes de este
+    cambio: sin el, se comportan como siempre.
+    """
     cid, tid = UUID(company_id), UUID(tenant_id)
     attempt = ctx.get("job_try", 1)
-    logger.info("audit_start domain=%s attempt=%s", domain, attempt)
+    logger.info("audit_start domain=%s type=%s attempt=%s", domain, target_type, attempt)
 
     await _set_tasks(cid, "RUNNING")
 
     try:
-        recon = await ScraperService().run_full_recon(domain)
+        recon = await ScraperService().run_full_recon(domain, target_type=target_type)
         findings = {
             "security": await SecurityAgent().analyze(recon),
             "optimization": await OptimizationAgent().analyze(recon),

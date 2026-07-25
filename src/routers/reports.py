@@ -66,7 +66,8 @@ async def run_full_audit(
     await db.commit()
 
     job = await get_queue().enqueue_job(
-        "run_audit", str(company.id), company.domain, str(ctx.tenant_id)
+        "run_audit", str(company.id), company.domain, str(ctx.tenant_id),
+        company.target_type,
     )
 
     return {
