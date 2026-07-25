@@ -97,6 +97,7 @@ async def run_audit(
     # El PDF captura sus propios errores y devuelve None: un fallo de
     # renderizado no puede impedir persistir el reporte, que es el dato de valor.
     pdf_bytes = await PDFGenerator.render_audit_pdf_bytes(payload)
+   
     
 
     async with AsyncSessionLocal() as session:

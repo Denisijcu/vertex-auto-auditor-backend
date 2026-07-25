@@ -149,7 +149,7 @@ async def get_latest_report(
         # Distingue "no se pudo medir" de "reporte de una version anterior del
         # motor". Sin esta bandera, el panel y el MCP los muestran igual.
         "legacy": not has_payload_score,
-        "pdf_url": f"/reports/{report.id}/pdf" if report.pdf_url else None,
+        "pdf_url": f"/reports/{report.id}/pdf" if report.pdf_bytes else None,
         "created_at": report.created_at.isoformat(),
     }
 
@@ -204,7 +204,7 @@ async def get_report_history(
                 "reliable": cov.get("reliable"),
             },
             "fingerprint": None if legacy else fingerprint(p),
-            "has_pdf": bool(r.pdf_url),
+            "has_pdf": bool(r.pdf_bytes),
             "legacy": legacy,
         })
 
