@@ -7,16 +7,13 @@ proceso aparte. Este modulo solo encola, consulta estado y sirve resultados.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from uuid import UUID
 
 from arq.jobs import Job, JobStatus
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.config import settings
 from src.core.auth import AuthContext, Scope, require, scoped
 from src.core.database import get_db
 from src.core.queue import get_queue
@@ -306,21 +303,17 @@ async def download_report_pdf(
     )
     report = (await db.execute(stmt)).scalar_one_or_none()
     # 404 y no 403: no se revela que el reporte existe en otro tenant.
-    if not report or not report.pdf_url:
+    if not report or not report.pdf_bytes:
         raise HTTPException(404, detail="PDF no disponible para este reporte")
 
-    base = Path(settings.REPORTS_DIR).resolve()
-    path = (base / report.pdf_url.lstrip("/")).resolve()
-
-    # Cinturon y tirantes: la ruta sale de la base y no del cliente, pero si
-    # una fila se corrompiera no debe poder servir nada fuera del directorio.
-    if not path.is_relative_to(base) or not path.is_file():
-        logger.error("pdf_missing report=%s path=%s", report_id, path)
-        raise HTTPException(404, detail="El archivo del reporte no esta disponible")
-
-    return FileResponse(
-        path,
+    # El PDF vive en la base, no en disco: el worker que lo genera y el web que
+    # lo sirve son contenedores distintos en Railway, con discos separados. Un
+    # archivo escrito por el worker nunca llegaba al disco del web.
+    return Response(
+        content=report.pdf_bytes,
         media_type="application/pdf",
-        filename=f"auditoria-{report_id}.pdf",
-        headers={"Cache-Control": "private, no-store"},
+        headers={
+            "Content-Disposition": f'attachment; filename="auditoria-{report_id}.pdf"',
+            "Cache-Control": "private, no-store",
+        },
     )
