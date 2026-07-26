@@ -11,7 +11,7 @@ from uuid import UUID
 
 from arq.jobs import Job, JobStatus
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.auth import AuthContext, Scope, require, scoped
@@ -75,6 +75,57 @@ async def run_full_audit(
         "company_id": str(company.id),
         "domain": company.domain,
         "poll": f"/reports/jobs/{job.job_id}",
+    }
+
+
+@router.delete("/admin/cleanup/{company_id}")
+async def cleanup_dead_tasks(
+    company_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    ctx: AuthContext = Depends(require(Scope.WRITE)),
+):
+    """ADMIN: Limpia tareas PENDING/RUNNING muertas para una compania.
+    
+    Usa esto si una auditoria anterior quedó atascada y bloquea nuevas auditorias.
+    Elimina los registros de AuditTask con status PENDING o RUNNING.
+    """
+    stmt = scoped(select(Company).where(Company.id == company_id), Company, ctx)
+    company = (await db.execute(stmt)).scalar_one_or_none()
+    if not company:
+        raise HTTPException(404, detail="Compania no encontrada")
+
+    # Primero consulta qué vamos a borrar
+    dead_tasks = await db.execute(
+        select(AuditTask).where(
+            AuditTask.company_id == company_id,
+            AuditTask.status.in_(["PENDING", "RUNNING"]),
+        )
+    )
+    tasks_to_delete = dead_tasks.scalars().all()
+    count = len(tasks_to_delete)
+
+    if count == 0:
+        return {
+            "status": "ok",
+            "message": "No hay tareas muertas para limpiar",
+            "deleted_count": 0,
+        }
+
+    # Borra las tareas muertas
+    await db.execute(
+        delete(AuditTask).where(
+            AuditTask.company_id == company_id,
+            AuditTask.status.in_(["PENDING", "RUNNING"]),
+        )
+    )
+    await db.commit()
+
+    logger.info("cleanup_dead_tasks company=%s deleted=%d", company_id, count)
+
+    return {
+        "status": "ok",
+        "message": f"Se limpiaron {count} tareas muertas",
+        "deleted_count": count,
     }
 
 
@@ -317,3 +368,4 @@ async def download_report_pdf(
             "Cache-Control": "private, no-store",
         },
     )
+
