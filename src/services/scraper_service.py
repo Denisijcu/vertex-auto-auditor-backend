@@ -238,13 +238,8 @@ class ScraperService:
 
     # ----------------------------------------------------------------- HTTP
     
-    async def _check_http(self, host: str, target_type: str = "website") -> list[Check]:
+    async def _check_http(self, host: str) -> list[Check]:
         url = f"https://{host}"
-        # Una API sirve JSON y la consume un cliente, no un navegador. Los checks
-        # que asumen un render en navegador (raiz con contenido, no-error-page,
-        # CSP self-block, X-Frame-Options) no aplican: salen NOT_ASSESSED, no
-        # PASS ni FAIL. "No aplica" es honesto; marcarlos PASS seria mentir.
-        is_api = target_type == "api"
         checks: list[Check] = []
 
         async def _on_response(resp: httpx.Response) -> None:
@@ -279,51 +274,28 @@ class ScraperService:
         # BUG CORREGIDO: antes era PASS incondicional. Un 404/500 en la raiz del
         # dominio se contaba como "accesible" porque no lanzaba excepcion.
         ok_status = resp.status_code < 400
-        if is_api:
-            # Un 404 en la raiz de una API es normal: puede no servir contenido
-            # en /. Lo que importa (TLS, servicio arriba) se mide aparte.
-            checks.append(Check(
-                id="http.reachable",
-                title="La raiz del dominio responde con un estado correcto",
-                status=CheckStatus.NOT_ASSESSED,
-                error="no aplica a un objetivo de tipo API: la raiz puede no servir contenido",
-                evidence={"status_code": resp.status_code, "target_type": "api"},
-            ))
-        else:
-            checks.append(Check(
-                id="http.reachable",
-                title="La raiz del dominio responde con un estado correcto",
-                status=CheckStatus.PASS if ok_status else CheckStatus.FAIL,
-                evidence={
-                    "status_code": resp.status_code,
-                    "reason": resp.reason_phrase,
-                    "final_url": str(resp.url),
-                    "redirects": len(resp.history),
-                    "content_type": h.get("content-type"),
-                },
-            ))
+        checks.append(Check(
+            id="http.reachable",
+            title="La raiz del dominio responde con un estado correcto",
+            status=CheckStatus.PASS if ok_status else CheckStatus.FAIL,
+            evidence={
+                "status_code": resp.status_code,
+                "reason": resp.reason_phrase,
+                "final_url": str(resp.url),
+                "redirects": len(resp.history),
+                "content_type": h.get("content-type"),
+            },
+        ))
 
         # Cabeceras de seguridad — ausencia AQUI si es dato medido (FAIL, no NOT_ASSESSED)
         for header, cid in SECURITY_HEADERS.items():
             present = header in h
-            # X-Frame-Options solo protege contra clickjacking, que necesita un
-            # navegador renderizando la respuesta en un iframe. Sobre JSON no
-            # aplica. Las demas cabeceras (HSTS, XCTO...) SI aplican a una API.
-            if is_api and header == "x-frame-options":
-                checks.append(Check(
-                    id=cid,
-                    title=f"Cabecera {header}",
-                    status=CheckStatus.NOT_ASSESSED,
-                    error="no aplica a un objetivo de tipo API: no hay render en navegador",
-                    evidence={"target_type": "api"},
-                ))
-            else:
-                checks.append(Check(
-                    id=cid,
-                    title=f"Cabecera {header}",
-                    status=CheckStatus.PASS if present else CheckStatus.FAIL,
-                    evidence={"present": present, "value": h.get(header)},
-                ))
+            checks.append(Check(
+                id=cid,
+                title=f"Cabecera {header}",
+                status=CheckStatus.PASS if present else CheckStatus.FAIL,
+                evidence={"present": present, "value": h.get(header)},
+            ))
 
         # Rendimiento — ahora medido, no asumido
         checks.append(Check(
@@ -347,32 +319,18 @@ class ScraperService:
         ))
 
         # --- Checks de contenido: lo que un escaner de cabeceras no ve ---
-        if is_api:
-            # No hay documento HTML que inspeccionar ni render que una CSP pueda
-            # romper: estos checks no aplican a un endpoint JSON.
-            checks.append(Check(
-                id="content.not_error_page",
-                title="El documento no es una pagina de error",
-                status=CheckStatus.NOT_ASSESSED,
-                error="no aplica a un objetivo de tipo API: no se sirve una pagina HTML"))
+        checks.append(check_not_error_page(
+            body, resp.status_code, str(resp.url), content_type=content_type))
+
+        if is_html:
+            checks.append(check_csp_self_block(
+                html, h.get("content-security-policy"), str(resp.url)))
+        else:
             checks.append(Check(
                 id="content.csp_self_block",
                 title="La CSP no bloquea recursos del propio sitio",
                 status=CheckStatus.NOT_ASSESSED,
-                error="no aplica a un objetivo de tipo API: no hay render en navegador"))
-        else:
-            checks.append(check_not_error_page(
-                body, resp.status_code, str(resp.url), content_type=content_type))
-
-            if is_html:
-                checks.append(check_csp_self_block(
-                    html, h.get("content-security-policy"), str(resp.url)))
-            else:
-                checks.append(Check(
-                    id="content.csp_self_block",
-                    title="La CSP no bloquea recursos del propio sitio",
-                    status=CheckStatus.NOT_ASSESSED,
-                    error=f"la respuesta no es HTML (content-type: {content_type or 'ausente'})"))
+                error=f"la respuesta no es HTML (content-type: {content_type or 'ausente'})"))
 
         # Redirect HTTP -> HTTPS
         checks.append(await self._check_http_redirect(host))
@@ -415,7 +373,7 @@ class ScraperService:
 
     # ------------------------------------------------------------ orquestador
 
-    async def run_full_recon(self, domain: str, target_type: str = "website") -> ReconResult:
+    async def run_full_recon(self, domain: str) -> ReconResult:
         """
         Punto de entrada unico. Valida scope, ejecuta en paralelo, agrega.
         Nunca lanza por fallo de un check individual: lo marca NOT_ASSESSED.
@@ -435,7 +393,7 @@ class ScraperService:
         groups = await asyncio.gather(
             self._check_dns(host),
             self._check_tls(host),
-            self._check_http(host, target_type=target_type),
+            self._check_http(host),
             return_exceptions=True,
         )
 
